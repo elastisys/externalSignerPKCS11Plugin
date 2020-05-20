@@ -259,14 +259,14 @@ func main() {
 	// 	fmt.Fprintf(os.Stderr, "[EXTERNAL] %s\n", err)
 	// }
 
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "[EXTERNAL] Argument missing\n")
+	configStr := os.Getenv("EXTERNAL_SIGNER_PLUGIN_CONFIG")
+
+	if configStr == "" {
+		fmt.Fprintf(os.Stderr, "[EXTERNAL] Environment variable not set\n")
 		os.Exit(1)
 	}
 
-	configStr := os.Args[1]
-
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] configStr: %s\n", configStr)
+	fmt.Fprintf(os.Stderr, "[EXTERNAL] configStr: %s\n", configStr)
 
 	err := parseConfig(configStr)
 
