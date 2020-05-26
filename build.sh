@@ -1,2 +1,2 @@
 #!/bin/bash
-go build externalSignerPKCS11Plugin.go
+go build -mod=vendor externalSignerPKCS11Plugin.go
