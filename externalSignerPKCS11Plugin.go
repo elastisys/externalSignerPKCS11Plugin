@@ -219,7 +219,7 @@ func (s *server) Sign(in *pb.SignatureRequest, stream pb.ExternalSignerService_S
 		return fmt.Errorf("find key pair error: %s", err)
 	}
 	if key == nil {
-		return fmt.Errorf("private key in slotID with objectID not found")
+		return fmt.Errorf("private key with objectID %v not found", *objectID)
 	}
 
 	// attr, err := crypto11Ctx.GetAttributes(key, []crypto11.AttributeType{crypto11.CkaAlwaysAuthenticate})
