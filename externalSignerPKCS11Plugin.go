@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/ThalesIgnite/crypto11"
+	"github.com/adrg/xdg"
 	"golang.org/x/crypto/ssh/terminal"
 
 	pb "k8s.io/client-go/plugin/pkg/client/auth/externalsigner/v1alpha1"
@@ -19,8 +20,6 @@ import (
 )
 
 const (
-	socketPath = "/home/jakub/workspace/kubectl-pkcs11/protobuf/externalsigner/externalsigner.sock"
-
 	cfgPathLib  = "pathLib"
 	cfgSlotID   = "slotId"
 	cfgObjectID = "objectId"
@@ -251,6 +250,11 @@ func (s *server) Sign(in *pb.SignatureRequest, stream pb.ExternalSignerService_S
 }
 
 func main() {
+	socketPath, err := xdg.RuntimeFile("externalsigner.sock")
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	if err := os.RemoveAll(socketPath); err != nil {
 		log.Fatal(err)
 	}
@@ -260,6 +264,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
+	log.Printf("Listening on: %v\n", lis.Addr().String())
+
 	s := grpc.NewServer()
 	pb.RegisterExternalSignerServiceServer(s, &server{})
 	if err := s.Serve(lis); err != nil {

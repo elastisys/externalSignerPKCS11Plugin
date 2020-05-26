@@ -1,7 +1,7 @@
 # github.com/ThalesIgnite/crypto11 v1.2.1
 github.com/ThalesIgnite/crypto11
-# github.com/docker/docker v1.13.1
-github.com/docker/docker/pkg/homedir
+# github.com/adrg/xdg v0.2.1
+github.com/adrg/xdg
 # github.com/gogo/protobuf v1.3.1
 github.com/gogo/protobuf/proto
 # github.com/golang/protobuf v1.3.3
@@ -12,8 +12,6 @@ github.com/golang/protobuf/ptypes/duration
 github.com/golang/protobuf/ptypes/timestamp
 # github.com/miekg/pkcs11 v1.0.3-0.20190429190417-a667d056470f
 github.com/miekg/pkcs11
-# github.com/opencontainers/runc v0.1.1
-github.com/opencontainers/runc/libcontainer/user
 # github.com/pkg/errors v0.8.1
 github.com/pkg/errors
 # github.com/thales-e-security/pool v0.0.1
