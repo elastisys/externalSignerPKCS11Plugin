@@ -191,7 +191,6 @@ func (s *server) GetCertificate(in *pb.CertificateRequest, stream pb.ExternalSig
 }
 
 func (s *server) Sign(in *pb.SignatureRequest, stream pb.ExternalSignerService_SignServer) error {
-	// configMap := in.GetConfiguration()
 	clusterName := in.GetClusterName()
 
 	log.Printf("Received sign request for cluster [%s]", clusterName)
@@ -226,8 +225,8 @@ func (s *server) Sign(in *pb.SignatureRequest, stream pb.ExternalSignerService_S
 
 	var dat []byte
 
-	switch in.GetSignerType() {
-	case pb.SignatureRequest_RSAPSS:
+	switch x := in.SignerOpts.(type) {
+	case *pb.SignatureRequest_SignerOptsRSAPSS:
 		pSSOptions := rsa.PSSOptions{
 			SaltLength: int(in.GetSignerOptsRSAPSS().GetSaltLenght()),
 			Hash:       crypto.Hash(in.GetSignerOptsRSAPSS().GetHash()),
@@ -238,7 +237,7 @@ func (s *server) Sign(in *pb.SignatureRequest, stream pb.ExternalSignerService_S
 			return fmt.Errorf("sign error: %v", err)
 		}
 	default:
-		return fmt.Errorf("SignerOpts for %s are not implemented", in.GetSignerType())
+		return fmt.Errorf("SignerOpts has unexpected type %T", x)
 	}
 
 	cache.deleteClient(clusterName)
