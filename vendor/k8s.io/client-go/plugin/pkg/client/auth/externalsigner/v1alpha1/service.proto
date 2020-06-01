@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package v1alpha1;
+
+// This service defines the public APIs for external signer plugin.
+service ExternalSignerService {
+    // Version returns the version of the external signer plugin.
+    rpc Version(VersionRequest) returns (VersionResponse) {}
+    // Get certificate from the external signer.
+    rpc GetCertificate(CertificateRequest) returns (stream CertificateResponse) {}
+    // Execute signing operation in the external signer plugin.
+    rpc Sign(SignatureRequest) returns (stream SignatureResponse) {}
+}
+
+enum Version {
+    v1alpha1 = 0;
+}
+
+message VersionRequest {
+    // Version of the external signer plugin API.
+    Version version = 1;
+}
+message VersionResponse {
+    // Version of the external signer plugin API.
+    Version version = 1;
+}
+message CertificateRequest {
+    // Version of the external signer plugin API.
+    Version version = 1;
+    // Name of the Kubernetes cluster.
+    string clusterName = 2;
+    // Configuration of the external signer plugin. This configuration is specific to the external signer, but stored in KUBECONFIG for the user's convenience to allow multiplexing a single external signer for several K8s users.
+    map<string, string> configuration = 3;
+}
+message CertificateResponse {
+    oneof content {
+        // Client certificate.
+        bytes certificate = 1;
+        // User prompt.
+        string userPrompt = 2;
+    }
+}
+message SignatureRequest {
+    // Version of the external signer plugin API.
+    Version version = 1;
+    // Name of the Kubernetes cluster.
+    string clusterName = 2;
+    // Configuration of the external signer plugin (HSM protocol specific).
+    map<string, string> configuration = 3;
+    // Digest to be signed.
+    bytes digest = 4;
+    // Definition of options for creating the PSS signature.
+    message RSAPSSOptions {
+        // Length of the salt for creating the PSS signature.
+        int32 saltLenght = 1;
+        // Hash function for creating the PSS signature.
+        uint32 hash = 2;
+    }
+    // Definition of options for creating the generic signature.
+    message GenericSignerOptions {
+        // Hash function for creating the generic signature.
+        uint32 hash = 1;
+    }
+    // Options for creating the signature.
+    oneof signerOpts {
+        GenericSignerOptions signerOptsRSAPKCS1 = 5;
+        RSAPSSOptions signerOptsRSAPSS = 6;
+        GenericSignerOptions signerOptsECDSA = 7;
+        GenericSignerOptions signerOptsED25519 = 8;
+    }
+}
+message SignatureResponse {
+    oneof content {
+        // Signature.
+        bytes signature = 1;
+        // User prompt.
+        string userPrompt = 2;
+    }
+}

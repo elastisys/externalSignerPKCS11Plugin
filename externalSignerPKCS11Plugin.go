@@ -1,291 +1,273 @@
 package main
 
 import (
+	"crypto"
 	"crypto/rsa"
-	b64 "encoding/base64"
-	"encoding/json"
 	"fmt"
+	"log"
+	"net"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/ThalesIgnite/crypto11"
+	"github.com/adrg/xdg"
 	"golang.org/x/crypto/ssh/terminal"
+
+	pb "k8s.io/client-go/plugin/pkg/client/auth/externalsigner/v1alpha1"
+
+	"google.golang.org/grpc"
 )
 
 const (
 	cfgPathLib  = "pathLib"
-	cfgPIN      = "pin"
 	cfgSlotID   = "slotId"
 	cfgObjectID = "objectId"
 )
 
-var path, operation, pinFromConfig string
-var slotID, objectID int
-
-func certificate() error {
-	config := &crypto11.Config{
-		Path:              path,
-		LoginNotSupported: true,
-		SlotNumber:        &slotID,
-	}
-
-	ctx, err := crypto11.Configure(config)
-	if err != nil {
-		return fmt.Errorf("crypto11 configure error: %v", err)
-	}
-
-	baObjectID := []byte{byte(objectID)}
-
-	certDat, err := ctx.FindCertificate(baObjectID, nil, nil)
-	if err != nil {
-		return fmt.Errorf("find certificate error: %v", err)
-	}
-	// var certDat *x509.Certificate
-	// ctx.ImportCertificate(baObjectID, certDat)
-	if certDat == nil {
-		return fmt.Errorf("certificate in slotID %v with objectID %v not found", slotID, objectID)
-	}
-
-	certificate := b64.StdEncoding.EncodeToString(certDat.Raw)
-
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] Certificate: %s\n", certificate)
-
-	type Message struct {
-		APIVersion  string `json:"apiVersion"`
-		Kind        string `json:"kind"`
-		Certificate string `json:"certificate"`
-		// PublicKey   string `json:"publicKey"`
-	}
-
-	message := Message{
-		APIVersion:  "external-signer.authentication.k8s.io/v1alpha1",
-		Kind:        "ExternalPublicKey",
-		Certificate: certificate,
-		// PublicKey:   "pubkey",
-	}
-
-	b, err := json.Marshal(message)
-
-	if err != nil {
-		fmt.Errorf("marshal error: %v", err)
-	}
-
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] Certificate: %s\n", certificate)
-
-	fmt.Println(string(b))
-
-	return nil
+type server struct {
+	pb.UnimplementedExternalSignerServiceServer
 }
 
-func sign(configMessageStr string) error {
+type clientCache struct {
+	mu sync.RWMutex
 
-	var pin string
-	if pinFromConfig != "" {
-		pin = pinFromConfig
-	} else {
-		fmt.Fprintf(os.Stderr, "[EXTERNAL] Enter pin: ")
-		pinByte, err := terminal.ReadPassword(int(os.Stdin.Fd()))
-		if err != nil {
-			return fmt.Errorf("pin error: %v", err)
-		}
-		fmt.Fprintf(os.Stderr, "\n")
-		pin = string(pinByte)
+	cache map[cacheKey]cacheValue
+}
 
-		// reader := bufio.NewReader(os.Stdin)
-		// fmt.Fprintf(os.Stderr, "Enter pin: ")
-		// pinWithDelimiter, err := reader.ReadString('\n')
-		// if err != nil {
-		// 	fmt.Fprintf(os.Stderr, "Error when reading new pin: %v", err)
-		// }
-		// pin = strings.TrimSuffix(pinWithDelimiter, "\n")
+var cache = newClientCache()
 
-		// fmt.Fprintf(os.Stderr, "New pin: [%s]\n", pin)
+func newClientCache() *clientCache {
+	return &clientCache{cache: make(map[cacheKey]cacheValue)}
+}
+
+type cacheKey struct {
+	clusterName string
+}
+
+type cacheValue struct {
+	crypto11Context *crypto11.Context
+	objectID        *int
+}
+
+func (c *clientCache) getClient(clusterName string) (cacheValue, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	client, ok := c.cache[cacheKey{clusterName: clusterName}]
+	return client, ok
+}
+
+// setClient attempts to put the client in the cache but may return any clients
+// with the same keys set before. This is so there's only ever one client for a provider.
+func (c *clientCache) setClient(clusterName string, client cacheValue) cacheValue {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := cacheKey{clusterName: clusterName}
+
+	// If another client has already initialized a client for the given provider we want
+	// to use that client instead of the one we're trying to set. This is so all transports
+	// share a client and can coordinate around the same mutex when refreshing and writing
+	// to the kubeconfig.
+	if oldClient, ok := c.cache[key]; ok {
+		return oldClient
 	}
 
+	c.cache[key] = client
+	return client
+}
+
+func (c *clientCache) deleteClient(clusterName string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := cacheKey{clusterName: clusterName}
+
+	c.cache[key].crypto11Context.Close()
+	delete(c.cache, key)
+}
+
+func parseConfigMap(configMap map[string]string) (*string, *int, *int, error) {
+	path := configMap[cfgPathLib]
+	if path == "" {
+		return nil, nil, nil, fmt.Errorf("must provide path %s", cfgPathLib)
+	}
+
+	slotID, err := strconv.Atoi(configMap[cfgSlotID])
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("must provide integer %s: %v", cfgSlotID, err)
+	}
+	objectID, err := strconv.Atoi(configMap[cfgObjectID])
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("must provide integer %s: %v", cfgObjectID, err)
+	}
+
+	return &path, &slotID, &objectID, nil
+}
+
+func getPin() (*string, error) {
+	// pinFromConfig := "123456"
+	// pinFromConfig := ""
+
+	var pin string
+	// if pinFromConfig != "" {
+	// 	pin = pinFromConfig
+	// } else {
+	fmt.Fprintf(os.Stderr, "Enter pin: ")
+	pinByte, err := terminal.ReadPassword(int(os.Stdin.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("pin error: %v", err)
+	}
+	fmt.Fprintf(os.Stderr, "\n")
+	pin = string(pinByte)
+	// }
+	return &pin, nil
+}
+
+func getCrypto11ContextWithPin(path string, slotID int, pin string) (*crypto11.Context, error) {
 	config := &crypto11.Config{
 		Path:       path,
 		Pin:        pin,
 		SlotNumber: &slotID,
+		// MaxSessions:     2,
+		// PoolWaitTimeout: 0,
 	}
 
-	ctx, err := crypto11.Configure(config)
+	crypto11Ctx, err := crypto11.Configure(config)
 	if err != nil {
-		return fmt.Errorf("crypto11 configure error: %v", err)
+		return nil, fmt.Errorf("crypto11 configure error: %v", err)
 	}
 
-	baObjectID := []byte{byte(objectID)}
+	return crypto11Ctx, err
+}
 
-	key, err := ctx.FindKeyPair(baObjectID, nil)
-	if err != nil {
-		return fmt.Errorf("find key pair rrror: %s", err)
-	}
-	if key == nil {
-		return fmt.Errorf("private key in slotID with objectID not found")
-	}
+func (s *server) GetCertificate(in *pb.CertificateRequest, stream pb.ExternalSignerService_GetCertificateServer) error {
+	configMap := in.GetConfiguration()
+	clusterName := in.GetClusterName()
 
-	type SignMessage struct {
-		APIVersion     string `json:"apiVersion"`
-		Kind           string `json:"kind"`
-		Digest         string `json:"digest"`
-		SignerOptsType string `json:"signerOptsType"`
-		SignerOpts     string `json:"signerOpts"`
-		// SignerOpts map[string]string `json:"signerOpts"`
-	}
+	log.Printf("Received get certificate request for cluster [%s]", clusterName)
 
-	var signMessage SignMessage
+	var crypto11Ctx *crypto11.Context
+	var objectID *int
+	var cv cacheValue
+	var ok bool
 
-	err = json.Unmarshal([]byte(configMessageStr), &signMessage)
-	if err != nil {
-		return fmt.Errorf("unmarshal error: %v", err)
-	}
-
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] signMessage: %s\n", signMessage)
-
-	digest, err := b64.StdEncoding.DecodeString(signMessage.Digest)
-	if err != nil {
-		return fmt.Errorf("digest decode error: %v", err)
-	}
-
-	var signature string
-
-	switch signMessage.SignerOptsType {
-	case "*rsa.PSSOptions":
-		var pSSOptions rsa.PSSOptions
-
-		fmt.Fprintf(os.Stderr, "[EXTERNAL] signMessage.SignerOpts: %s\n", signMessage.SignerOpts)
-		err := json.Unmarshal([]byte(signMessage.SignerOpts), &pSSOptions)
+	if cv, ok = cache.getClient(clusterName); ok {
+		fmt.Printf("Using cached context for get certificate\n")
+		crypto11Ctx = cv.crypto11Context
+		objectID = cv.objectID
+	} else {
+		fmt.Printf("Creating new context\n")
+		path, slotID, objectIDLocal, err := parseConfigMap(configMap)
 		if err != nil {
-			return fmt.Errorf("unmarshal error: %v", err)
+			return fmt.Errorf("parse config map error: %v", err)
 		}
 
-		// fmt.Fprintf(os.Stderr, "[EXTERNAL] pSSOptions: %d, %d\n", pSSOptions.Hash, pSSOptions.SaltLength)
-		dat, err := key.Sign(nil, digest, &pSSOptions)
+		stream.Send(&pb.CertificateResponse{Content: &pb.CertificateResponse_UserPrompt{UserPrompt: "Provide PIN in the external signer console."}})
+		pin, err := getPin()
 		if err != nil {
-			return fmt.Errorf("sign error: %v", err)
+			return err
 		}
-		signature = b64.StdEncoding.EncodeToString(dat)
-	case "":
-		return fmt.Errorf("SignerOpts type was not provided")
-	default:
-		return fmt.Errorf("SignerOpts for %s are not implemented", signMessage.SignerOptsType)
+
+		crypto11Ctx, err = getCrypto11ContextWithPin(*path, *slotID, *pin)
+		if err != nil {
+			return fmt.Errorf("get crypto11 context error: %v", err)
+		}
+		objectID = objectIDLocal
+		cache.setClient(clusterName, cacheValue{crypto11Context: crypto11Ctx, objectID: objectIDLocal})
 	}
 
-	// pssOpts := &rsa.PSSOptions{
-	// 	SaltLength: -1,
-	// 	Hash:       crypto.SHA256.HashFunc(),
-	// }
+	baObjectID := []byte{byte(*objectID)}
 
-	// dat, err := key.Sign(nil, digest, pssOpts)
-	// dat, err := key.Sign(nil, digest, signMessage.SignerOpts)
-	// dat, err := key.Sign(nil, digest, opts)
-	// signature := b64.StdEncoding.EncodeToString(dat)
-
-	type Message struct {
-		APIVersion string `json:"apiVersion"`
-		Kind       string `json:"kind"`
-		Signature  string `json:"signature"`
-	}
-
-	message := Message{
-		APIVersion: "external-signer.authentication.k8s.io/v1alpha1",
-		Kind:       "ExternalSigner",
-		Signature:  signature,
-	}
-
-	b, err := json.Marshal(message)
+	certDat, err := crypto11Ctx.FindCertificate(baObjectID, nil, nil)
 	if err != nil {
-		return fmt.Errorf("marshal error: %v", err)
+		return fmt.Errorf("find certificate error: %v", err)
 	}
 
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] Digest: %s\n", signMessage.Digest)
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] Signature: %s\n", signature)
+	if certDat == nil {
+		return fmt.Errorf("could not find certificate with the given slotID and objectID")
+	}
 
-	fmt.Println(string(b))
-
+	stream.Send(&pb.CertificateResponse{Content: &pb.CertificateResponse_Certificate{Certificate: certDat.Raw}})
 	return nil
 }
 
-func parseConfig(configStr string) error {
-	type ConfigMessage struct {
-		APIVersion    string            `json:"apiVersion"`
-		Kind          string            `json:"kind"`
-		Configuration map[string]string `json:"configuration"`
+func (s *server) Sign(in *pb.SignatureRequest, stream pb.ExternalSignerService_SignServer) error {
+	clusterName := in.GetClusterName()
+
+	log.Printf("Received sign request for cluster [%s]", clusterName)
+
+	var crypto11Ctx *crypto11.Context
+	var objectID *int
+	var ok bool
+	var cv cacheValue
+
+	if cv, ok = cache.getClient(clusterName); ok {
+		fmt.Printf("Using cached context for signing\n")
+		crypto11Ctx = cv.crypto11Context
+		objectID = cv.objectID
+	} else {
+		return fmt.Errorf("Context not available")
+
+		// stream.Send(&pb.SignatureResponse{Content: &pb.SignatureResponse_UserPrompt{UserPrompt: "Provide PIN in the external signer console."}})
 	}
 
-	var configMessage ConfigMessage
+	baObjectID := []byte{byte(*objectID)}
 
-	err := json.Unmarshal([]byte(configStr), &configMessage)
+	key, err := crypto11Ctx.FindKeyPair(baObjectID, nil)
+
 	if err != nil {
-		// fmt.Errorf("[EXTERNAL] exec: %v", err)
-		return fmt.Errorf("unmarshal error: %v", err)
+		return fmt.Errorf("find key pair error: %s", err)
+	}
+	if key == nil {
+		return fmt.Errorf("private key with objectID %v not found", *objectID)
 	}
 
-	operation = configMessage.Kind
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] Kind: %s\n", operation)
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] Pin from config file: %s\n", configMessage.Configuration[cfgPIN])
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] SlotID: %s\n", configMessage.Protocol.SlotID)
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] ObjectID: %s\n", configMessage.Protocol.ObjectID)
+	// attr, err := crypto11Ctx.GetAttributes(key, []crypto11.AttributeType{crypto11.CkaAlwaysAuthenticate})
 
-	path = configMessage.Configuration[cfgPathLib]
-	if path == "" {
-		return fmt.Errorf("must provide path %s", cfgPathLib)
+	var dat []byte
+
+	switch x := in.SignerOpts.(type) {
+	case *pb.SignatureRequest_SignerOptsRSAPSS:
+		pSSOptions := rsa.PSSOptions{
+			SaltLength: int(in.GetSignerOptsRSAPSS().GetSaltLenght()),
+			Hash:       crypto.Hash(in.GetSignerOptsRSAPSS().GetHash()),
+		}
+
+		dat, err = key.Sign(nil, in.GetDigest(), &pSSOptions)
+		if err != nil {
+			return fmt.Errorf("sign error: %v", err)
+		}
+	default:
+		return fmt.Errorf("SignerOpts has unexpected type %T", x)
 	}
 
-	pinFromConfig = configMessage.Configuration[cfgPIN]
+	cache.deleteClient(clusterName)
 
-	slotID, err = strconv.Atoi(configMessage.Configuration[cfgSlotID])
-	if err != nil {
-		return fmt.Errorf("must provide integer SlotID: %v", err)
-	}
+	log.Printf("Signature sent")
 
-	objectID, err = strconv.Atoi(configMessage.Configuration[cfgObjectID])
-	if err != nil {
-		return fmt.Errorf("must provide integer ObjectID: %v", err)
-	}
-
+	stream.Send(&pb.SignatureResponse{Content: &pb.SignatureResponse_Signature{Signature: dat}})
 	return nil
 }
 
 func main() {
-
-	// scanner := bufio.NewScanner(os.Stdin)
-	// // for scanner.Scan() {
-	// scanner.Scan()
-	// configStr := scanner.Text()
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] configStr: %s\n", configStr)
-	// // }
-	// if err := scanner.Err(); err != nil {
-	// 	log.Println(err)
-	// 	fmt.Fprintf(os.Stderr, "[EXTERNAL] %s\n", err)
-	// }
-
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "[EXTERNAL] Argument missing\n")
-		os.Exit(1)
+	socketPath, err := xdg.RuntimeFile("externalsigner.sock")
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	configStr := os.Args[1]
+	if err := os.RemoveAll(socketPath); err != nil {
+		log.Fatal(err)
+	}
 
-	// fmt.Fprintf(os.Stderr, "[EXTERNAL] configStr: %s\n", configStr)
-
-	err := parseConfig(configStr)
+	lis, err := net.Listen("unix", socketPath)
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[EXTERNAL] Exit with failure: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("failed to listen: %v", err)
 	}
+	log.Printf("Listening on: %v\n", lis.Addr().String())
 
-	switch operation {
-	case "Certificate":
-		err = certificate()
-	case "Sign":
-		err = sign(configStr)
-	default:
-		err = fmt.Errorf("undefined operation %s", operation)
-	}
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[EXTERNAL] Exit with failure: %v\n", err)
-		os.Exit(1)
+	s := grpc.NewServer()
+	pb.RegisterExternalSignerServiceServer(s, &server{})
+	if err := s.Serve(lis); err != nil {
+		log.Fatalf("failed to serve: %v", err)
 	}
 }
