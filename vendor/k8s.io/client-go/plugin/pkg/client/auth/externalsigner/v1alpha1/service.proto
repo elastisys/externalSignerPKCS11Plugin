@@ -11,11 +11,9 @@ service ExternalSignerService {
     // Execute signing operation in the external signer plugin.
     rpc Sign(SignatureRequest) returns (stream SignatureResponse) {}
 }
-
 enum Version {
     v1alpha1 = 0;
 }
-
 message VersionRequest {
     // Version of the external signer plugin API.
     Version version = 1;
@@ -24,11 +22,27 @@ message VersionResponse {
     // Version of the external signer plugin API.
     Version version = 1;
 }
+// Cluster contains information to allow an exec plugin to communicate with the
+// kubernetes cluster being authenticated to.
+message Cluster {
+    // Server is the address of the kubernetes cluster (https://hostname:port).
+    string server = 1;
+    // ServerName is passed to the server for SNI and is used in the client to
+    // check server certificates against. If ServerName is empty, the hostname
+    // used to contact the server is used.
+    string serverName = 2;
+    // CAData contains PEM-encoded certificate authority certificates.
+    // If empty, system roots should be used.
+    bytes caData = 3;
+    // Config holds additional config data that is specific to the exec plugin
+    // with regards to the cluster being authenticated to.
+    bytes config = 4;
+}
 message CertificateRequest {
     // Version of the external signer plugin API.
     Version version = 1;
-    // Name of the Kubernetes cluster.
-    string clusterName = 2;
+    // Cluster information.
+    Cluster cluster = 2;
     // Configuration of the external signer plugin. This configuration is specific to the external signer, but stored in KUBECONFIG for the user's convenience to allow multiplexing a single external signer for several K8s users.
     map<string, string> configuration = 3;
 }
@@ -43,8 +57,8 @@ message CertificateResponse {
 message SignatureRequest {
     // Version of the external signer plugin API.
     Version version = 1;
-    // Name of the Kubernetes cluster.
-    string clusterName = 2;
+    // Cluster information.
+    Cluster cluster = 2;
     // Configuration of the external signer plugin (HSM protocol specific).
     map<string, string> configuration = 3;
     // Digest to be signed.
