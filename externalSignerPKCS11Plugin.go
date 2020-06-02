@@ -141,16 +141,16 @@ func getCrypto11ContextWithPin(path string, slotID int, pin string) (*crypto11.C
 
 func (s *server) GetCertificate(in *pb.CertificateRequest, stream pb.ExternalSignerService_GetCertificateServer) error {
 	configMap := in.GetConfiguration()
-	clusterName := in.GetClusterName()
+	cluster := in.GetCluster()
 
-	log.Printf("Received get certificate request for cluster [%s]", clusterName)
+	log.Printf("Received get certificate request for cluster [%s]", cluster.Server)
 
 	var crypto11Ctx *crypto11.Context
 	var objectID *int
 	var cv cacheValue
 	var ok bool
 
-	if cv, ok = cache.getClient(clusterName); ok {
+	if cv, ok = cache.getClient(cluster.Server); ok {
 		fmt.Printf("Using cached context for get certificate\n")
 		crypto11Ctx = cv.crypto11Context
 		objectID = cv.objectID
@@ -172,7 +172,7 @@ func (s *server) GetCertificate(in *pb.CertificateRequest, stream pb.ExternalSig
 			return fmt.Errorf("get crypto11 context error: %v", err)
 		}
 		objectID = objectIDLocal
-		cache.setClient(clusterName, cacheValue{crypto11Context: crypto11Ctx, objectID: objectIDLocal})
+		cache.setClient(cluster.Server, cacheValue{crypto11Context: crypto11Ctx, objectID: objectIDLocal})
 	}
 
 	baObjectID := []byte{byte(*objectID)}
@@ -191,16 +191,16 @@ func (s *server) GetCertificate(in *pb.CertificateRequest, stream pb.ExternalSig
 }
 
 func (s *server) Sign(in *pb.SignatureRequest, stream pb.ExternalSignerService_SignServer) error {
-	clusterName := in.GetClusterName()
+	cluster := in.GetCluster()
 
-	log.Printf("Received sign request for cluster [%s]", clusterName)
+	log.Printf("Received sign request for cluster [%s]", cluster.Server)
 
 	var crypto11Ctx *crypto11.Context
 	var objectID *int
 	var ok bool
 	var cv cacheValue
 
-	if cv, ok = cache.getClient(clusterName); ok {
+	if cv, ok = cache.getClient(cluster.Server); ok {
 		fmt.Printf("Using cached context for signing\n")
 		crypto11Ctx = cv.crypto11Context
 		objectID = cv.objectID
@@ -240,7 +240,7 @@ func (s *server) Sign(in *pb.SignatureRequest, stream pb.ExternalSignerService_S
 		return fmt.Errorf("SignerOpts has unexpected type %T", x)
 	}
 
-	cache.deleteClient(clusterName)
+	cache.deleteClient(cluster.Server)
 
 	log.Printf("Signature sent")
 
