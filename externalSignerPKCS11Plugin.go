@@ -12,6 +12,7 @@ import (
 
 	"github.com/ThalesIgnite/crypto11"
 	"github.com/adrg/xdg"
+	"github.com/spf13/viper"
 	"golang.org/x/crypto/ssh/terminal"
 
 	pb "k8s.io/client-go/plugin/pkg/client/auth/externalsigner/v1alpha1"
@@ -20,9 +21,10 @@ import (
 )
 
 const (
-	cfgPathLib  = "pathLib"
-	cfgSlotID   = "slotId"
-	cfgObjectID = "objectId"
+	cfgSocketName = "socketName"
+	cfgPathLib    = "pathLib"
+	cfgSlotID     = "slotId"
+	cfgObjectID   = "objectId"
 )
 
 type server struct {
@@ -85,22 +87,52 @@ func (c *clientCache) deleteClient(clusterName string) {
 	delete(c.cache, key)
 }
 
-func parseConfigMap(configMap map[string]string) (*string, *int, *int, error) {
+func loadConfigFile() error {
+	err := viper.ReadInConfig() // Find and read the config file
+	if err != nil {             // Handle errors reading the config file
+		log.Printf("Error while reading config file: %s \n", err)
+		return err
+	}
+
+	socketName := viper.GetString(cfgSocketName)
+	pathLib := viper.GetString(cfgPathLib)
+	slotID := viper.GetInt(cfgSlotID)
+	objectID := viper.GetInt(cfgObjectID)
+
+	fmt.Printf("=== From external plugin config ===\n")
+	fmt.Printf("%s: %s\n", cfgSocketName, socketName)
+	fmt.Printf("%s: %s\n", cfgPathLib, pathLib)
+	fmt.Printf("%s: %v\n", cfgSlotID, slotID)
+	fmt.Printf("%s: %v\n", cfgObjectID, objectID)
+
+	return nil
+}
+
+func setDefaultConfig() {
+	log.Printf("Setting default configuration\n")
+	viper.SetDefault(cfgSocketName, "externalsigner.sock")
+	viper.SetDefault(cfgPathLib, "/usr/local/lib/libykcs11.so")
+	viper.SetDefault(cfgSlotID, "0")
+	viper.SetDefault(cfgObjectID, "2")
+}
+
+func getConfig(configMap map[string]string) (*string, *int, *int) {
 	path := configMap[cfgPathLib]
 	if path == "" {
-		return nil, nil, nil, fmt.Errorf("must provide path %s", cfgPathLib)
+		path = viper.GetString(cfgPathLib)
 	}
 
 	slotID, err := strconv.Atoi(configMap[cfgSlotID])
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("must provide integer %s: %v", cfgSlotID, err)
-	}
-	objectID, err := strconv.Atoi(configMap[cfgObjectID])
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("must provide integer %s: %v", cfgObjectID, err)
+		slotID = viper.GetInt(cfgSlotID)
 	}
 
-	return &path, &slotID, &objectID, nil
+	objectID, err := strconv.Atoi(configMap[cfgObjectID])
+	if err != nil {
+		objectID = viper.GetInt(cfgObjectID)
+	}
+
+	return &path, &slotID, &objectID
 }
 
 func getPin() (*string, error) {
@@ -156,10 +188,7 @@ func (s *server) GetCertificate(in *pb.CertificateRequest, stream pb.ExternalSig
 		objectID = cv.objectID
 	} else {
 		fmt.Printf("Creating new context\n")
-		path, slotID, objectIDLocal, err := parseConfigMap(configMap)
-		if err != nil {
-			return fmt.Errorf("parse config map error: %v", err)
-		}
+		path, slotID, objectIDLocal := getConfig(configMap)
 
 		stream.Send(&pb.CertificateResponse{Content: &pb.CertificateResponse_UserPrompt{UserPrompt: "Provide PIN in the external signer console."}})
 		pin, err := getPin()
@@ -178,12 +207,17 @@ func (s *server) GetCertificate(in *pb.CertificateRequest, stream pb.ExternalSig
 	baObjectID := []byte{byte(*objectID)}
 
 	certDat, err := crypto11Ctx.FindCertificate(baObjectID, nil, nil)
-	if err != nil {
-		return fmt.Errorf("find certificate error: %v", err)
-	}
+	if err != nil || certDat == nil {
+		cache.deleteClient(cluster.Server) // do not cache failing settings
 
-	if certDat == nil {
-		return fmt.Errorf("could not find certificate with the given slotID and objectID")
+		var errorMessage string
+		if err != nil {
+			errorMessage = fmt.Sprintf("find certificate error: %v", err)
+		} else {
+			errorMessage = "could not find certificate with the given slotID and objectID"
+		}
+
+		return fmt.Errorf(errorMessage)
 	}
 
 	stream.Send(&pb.CertificateResponse{Content: &pb.CertificateResponse_Certificate{Certificate: certDat.Raw}})
@@ -249,7 +283,14 @@ func (s *server) Sign(in *pb.SignatureRequest, stream pb.ExternalSignerService_S
 }
 
 func main() {
-	socketPath, err := xdg.RuntimeFile("externalsigner.sock")
+	viper.SetConfigName("config") // name of config file (without extension)
+	viper.SetConfigType("yaml")   // REQUIRED if the config file does not have the extension in the name
+	viper.AddConfigPath(".")      // optionally look for config in the working directory
+
+	setDefaultConfig()
+	loadConfigFile()
+
+	socketPath, err := xdg.RuntimeFile(viper.GetString(cfgSocketName))
 	if err != nil {
 		log.Fatal(err)
 	}
