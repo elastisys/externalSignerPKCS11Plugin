@@ -9,6 +9,7 @@ require (
 	github.com/gogo/protobuf v1.3.1 // indirect
 	github.com/google/go-cmp v0.3.0 // indirect
 	github.com/kr/pretty v0.1.0 // indirect
+	github.com/spf13/viper v1.7.0
 	github.com/stretchr/testify v1.4.0 // indirect
 	golang.org/x/crypto v0.0.0-20200510223506-06a226fb4e37
 	golang.org/x/net v0.0.0-20191004110552-13f9640d40b9 // indirect
