@@ -34,13 +34,13 @@ type server struct {
 type clientCache struct {
 	mu sync.RWMutex
 
-	cache map[cacheKey]cacheValue
+	cache map[cacheKey]*cacheValue
 }
 
 var cache = newClientCache()
 
 func newClientCache() *clientCache {
-	return &clientCache{cache: make(map[cacheKey]cacheValue)}
+	return &clientCache{cache: make(map[cacheKey]*cacheValue)}
 }
 
 type cacheKey struct {
@@ -52,7 +52,7 @@ type cacheValue struct {
 	objectID        *int
 }
 
-func (c *clientCache) getClient(clusterName string) (cacheValue, bool) {
+func (c *clientCache) getClient(clusterName string) (*cacheValue, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	client, ok := c.cache[cacheKey{clusterName: clusterName}]
@@ -61,7 +61,7 @@ func (c *clientCache) getClient(clusterName string) (cacheValue, bool) {
 
 // setClient attempts to put the client in the cache but may return any clients
 // with the same keys set before. This is so there's only ever one client for a provider.
-func (c *clientCache) setClient(clusterName string, client cacheValue) cacheValue {
+func (c *clientCache) setClient(clusterName string, client *cacheValue) *cacheValue {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := cacheKey{clusterName: clusterName}
@@ -179,7 +179,7 @@ func (s *server) GetCertificate(in *pb.CertificateRequest, stream pb.ExternalSig
 
 	var crypto11Ctx *crypto11.Context
 	var objectID *int
-	var cv cacheValue
+	var cv *cacheValue
 	var ok bool
 
 	if cv, ok = cache.getClient(cluster.Server); ok {
@@ -201,7 +201,7 @@ func (s *server) GetCertificate(in *pb.CertificateRequest, stream pb.ExternalSig
 			return fmt.Errorf("get crypto11 context error: %v", err)
 		}
 		objectID = objectIDLocal
-		cache.setClient(cluster.Server, cacheValue{crypto11Context: crypto11Ctx, objectID: objectIDLocal})
+		cache.setClient(cluster.Server, &cacheValue{crypto11Context: crypto11Ctx, objectID: objectIDLocal})
 	}
 
 	baObjectID := []byte{byte(*objectID)}
@@ -232,7 +232,7 @@ func (s *server) Sign(in *pb.SignatureRequest, stream pb.ExternalSignerService_S
 	var crypto11Ctx *crypto11.Context
 	var objectID *int
 	var ok bool
-	var cv cacheValue
+	var cv *cacheValue
 
 	if cv, ok = cache.getClient(cluster.Server); ok {
 		fmt.Printf("Using cached context for signing\n")
