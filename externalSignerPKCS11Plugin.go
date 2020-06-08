@@ -3,6 +3,7 @@ package main
 import (
 	"crypto"
 	"crypto/rsa"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -38,6 +39,7 @@ type clientCache struct {
 }
 
 var cache = newClientCache()
+var passwordReader PasswordReader
 
 func newClientCache() *clientCache {
 	return &clientCache{cache: make(map[cacheKey]*cacheValue)}
@@ -135,6 +137,29 @@ func getConfig(configMap map[string]string) (*string, *int, *int) {
 	return &path, &slotID, &objectID
 }
 
+type PasswordReader interface {
+	ReadPassword() (string, error)
+}
+
+type StdInPasswordReader struct {
+}
+
+func (pr StdInPasswordReader) ReadPassword() (string, error) {
+	pwd, error := terminal.ReadPassword(int(os.Stdin.Fd()))
+	return string(pwd), error
+}
+
+func readPassword() (string, error) {
+	pwd, err := passwordReader.ReadPassword()
+	if err != nil {
+		return "", err
+	}
+	if len(pwd) == 0 {
+		return "", errors.New("empty password provided")
+	}
+	return pwd, nil
+}
+
 func getPin() (*string, error) {
 	// pinFromConfig := "123456"
 	// pinFromConfig := ""
@@ -144,12 +169,12 @@ func getPin() (*string, error) {
 	// 	pin = pinFromConfig
 	// } else {
 	fmt.Fprintf(os.Stderr, "Enter pin: ")
-	pinByte, err := terminal.ReadPassword(int(os.Stdin.Fd()))
+	pin, err := readPassword()
+
 	if err != nil {
 		return nil, fmt.Errorf("pin error: %v", err)
 	}
 	fmt.Fprintf(os.Stderr, "\n")
-	pin = string(pinByte)
 	// }
 	return &pin, nil
 }
@@ -289,6 +314,8 @@ func main() {
 
 	setDefaultConfig()
 	loadConfigFile()
+
+	passwordReader = StdInPasswordReader{}
 
 	socketPath, err := xdg.RuntimeFile(viper.GetString(cfgSocketName))
 	if err != nil {
